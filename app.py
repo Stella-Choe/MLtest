@@ -1,635 +1,860 @@
 import streamlit as st
-import streamlit.components.v1 as components
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import io
 
-# 페이지 기본 설정
+# -----------------------------------------------------------------------------
+# 0. 페이지 기본 설정 및 세션 상태 초기화
+# -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="머신러닝 플레이그라운드 - 선형 회귀",
-    page_icon="🤖",
+    page_title="CSV 데이터로 배우는 선형회귀 실험실",
+    page_icon="📈",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-# 스트림릿 페이지 스타일 최적화 (여백 제거)
-st.markdown("""
-    <style>
-        .block-container {
-            padding-top: 1rem;
-            padding-bottom: 0rem;
-            padding-left: 1rem;
-            padding-right: 1rem;
-        }
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-    </style>
-""", unsafe_allow_html=True)
+# 세션 상태(st.session_state) 초기화: 탭 이동 간 데이터 및 모델 정보 유지
+if "df" not in st.session_state:
+    st.session_state.df = None
+if "simple_model_results" not in st.session_state:
+    st.session_state.simple_model_results = None
+if "multi_model_results" not in st.session_state:
+    st.session_state.multi_model_results = None
 
-# HTML/CSS/JS 프론트엔드 코드
-html_code = """
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>머신러닝 플레이그라운드 - 선형 회귀</title>
-  <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Google Font: Noto Sans KR -->
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <style>
-    body {
-      font-family: 'Noto Sans KR', sans-serif;
-      touch-action: manipulation;
-    }
+
+# -----------------------------------------------------------------------------
+# 1. 주요 모듈별 함수 정의 (인공지능 및 데이터 처리 로직)
+# -----------------------------------------------------------------------------
+
+def generate_sample_data():
+    """
+    기온, 습도, 풍속, 강수량과 PM2.5 사이의 실제 기상 관계를 반영한 120행 샘플 데이터 생성
+    """
+    np.random.seed(42)
+    n_samples = 120
+
+    temperature = np.random.uniform(-5, 35, n_samples)          # 기온 (-5°C ~ 35°C)
+    humidity = np.random.uniform(20, 95, n_samples)             # 습도 (20% ~ 95%)
+    wind_speed = np.random.uniform(0.5, 8.0, n_samples)         # 풍속 (0.5m/s ~ 8m/s)
+    rainfall = np.where(np.random.rand(n_samples) > 0.7, np.random.uniform(1, 30, n_samples), 0.0) # 강수량
+
+    # 물리적 경향성 반영: 풍속이 셀수록, 강수량이 많을수록 PM2.5 감소 / 기온과 습도는 세정에 영향
+    pm25 = (
+        50.0 
+        + (temperature * 0.4) 
+        + (humidity * 0.2) 
+        - (wind_speed * 5.5) 
+        - (rainfall * 1.2) 
+        + np.random.normal(0, 5, n_samples)
+    )
+    # PM2.5는 음수가 될 수 없음
+    pm25 = np.clip(pm25, 5, 150)
+
+    df_sample = pd.DataFrame({
+        "temperature": np.round(temperature, 1),
+        "humidity": np.round(humidity, 1),
+        "wind_speed": np.round(wind_speed, 1),
+        "rainfall": np.round(rainfall, 1),
+        "pm25": np.round(pm25, 1)
+    })
+    return df_sample
+
+
+def load_csv(uploaded_file):
+    """
+    UTF-8 및 CP949 인코딩을 자동 지원하여 CSV 파일 읽기
+    """
+    try:
+        # UTF-8 시도
+        df = pd.read_csv(uploaded_file, encoding="utf-8")
+        return df, None
+    except UnicodeDecodeError:
+        try:
+            # CP949(EUC-KR) 시도
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding="cp949")
+            return df, None
+        except Exception as e:
+            return None, f"파일 인코딩 오류: UTF-8 또는 CP949 형식이어야 합니다. ({str(e)})"
+    except Exception as e:
+        return None, f"CSV 파일을 읽는 중 오류가 발생했습니다: {str(e)}"
+
+
+def validate_data(df):
+    """
+    업로드된 데이터의 숫자형 열 개수 및 행 수 유효성 검사
+    """
+    if df is None:
+        return False, "데이터가 업로드되지 않았습니다."
     
-    .canvas-container {
-      position: relative;
-      width: 100%;
-      padding-bottom: 60%; /* 비율을 조정하여 화면 가독성 개선 */
-      height: 0;
-    }
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if len(numeric_cols) < 2:
+        return False, "선형회귀 분석을 수행하려면 최소 2개 이상의 숫자형(수치형) 열이 필요합니다."
     
-    .canvas-container canvas {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-    }
-
-    input[type=range]::-webkit-slider-thumb {
-      width: 22px;
-      height: 22px;
-    }
-  </style>
-</head>
-<body class="bg-slate-50 text-slate-800 min-h-screen pb-12">
-
-  <div class="max-w-4xl mx-auto px-4 py-4">
+    if len(df) < 10:
+        return False, "데이터 행 수가 너무 적습니다 (10개 미만). 최소 10개 이상의 데이터가 필요합니다."
     
-    <!-- 헤더 영역 -->
-    <header class="text-center mb-6">
-      <div class="inline-flex items-center gap-2 px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-bold mb-2">
-        <span>고등학생을 위한 인공지능 실습</span>
-        <span>•</span>
-        <span>1단계</span>
-      </div>
-      <h1 class="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight">
-        🤖 머신러닝 플레이그라운드
-      </h1>
-      <p class="text-slate-600 text-sm md:text-base mt-1">
-        점을 찍고 경사하강법으로 최적의 회귀선(y = mx + b)을 찾아내는 과정을 체험해보세요.
-      </p>
-    </header>
+    return True, f"유효한 데이터입니다. (총 {len(df)}행, 숫자형 열 {len(numeric_cols)}개)"
 
-    <!-- 메인 카드 컨테이너 -->
-    <div class="bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden mb-6">
-      
-      <!-- 상단 컨트롤 바 -->
-      <div class="p-4 md:p-5 bg-slate-100/80 border-b border-slate-200 flex flex-col md:flex-row gap-4 justify-between items-stretch md:items-center">
-        
-        <!-- 모드 전환 버튼 -->
-        <div class="flex bg-slate-200/80 p-1 rounded-xl gap-1">
-          <button id="modeAddBtn" onclick="setMode('add')" class="flex-1 md:flex-none px-4 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm bg-white text-blue-600">
-            <span>📍 데이터 추가</span>
-          </button>
-          <button id="modePredictBtn" onclick="setMode('predict')" class="flex-1 md:flex-none px-4 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-1.5 text-slate-600 hover:text-slate-900">
-            <span>🎯 예측하기</span>
-          </button>
-        </div>
 
-        <!-- 액션 버튼 그룹 -->
-        <div class="flex flex-wrap items-center gap-2">
-          <button onclick="loadSampleData()" class="flex-1 sm:flex-none px-3.5 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold rounded-xl text-sm transition-all active:scale-95 flex items-center justify-center gap-1">
-            🎲 예시 데이터
-          </button>
-          <button id="trainBtn" onclick="startTraining()" class="flex-1 sm:flex-none px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-sm shadow-md shadow-blue-500/20 transition-all active:scale-95 flex items-center justify-center gap-1">
-            ▶ 학습 시작
-          </button>
-          <button onclick="resetData()" class="px-3.5 py-2.5 bg-rose-100 hover:bg-rose-200 text-rose-700 font-semibold rounded-xl text-sm transition-all active:scale-95 flex items-center justify-center gap-1">
-            🔄 초기화
-          </button>
-        </div>
-      </div>
-
-      <!-- 슬라이더 조절바 -->
-      <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row gap-4 items-stretch sm:items-center justify-between text-sm">
-        <div class="flex items-center gap-3 flex-1">
-          <label for="epochsSlider" class="font-bold text-slate-700 whitespace-nowrap min-w-[90px]">
-            학습 횟수 (Epochs):
-          </label>
-          <input type="range" id="epochsSlider" min="10" max="500" step="10" value="100" class="w-full accent-blue-600 cursor-pointer h-2 bg-slate-200 rounded-lg">
-          <span id="epochsVal" class="font-extrabold text-blue-600 min-w-[45px] text-right">100회</span>
-        </div>
-
-        <div class="flex items-center gap-3 flex-1">
-          <label for="lrSlider" class="font-bold text-slate-700 whitespace-nowrap min-w-[90px]">
-            학습률 (Alpha):
-          </label>
-          <input type="range" id="lrSlider" min="0.005" max="0.2" step="0.005" value="0.05" class="w-full accent-blue-600 cursor-pointer h-2 bg-slate-200 rounded-lg">
-          <span id="lrVal" class="font-extrabold text-blue-600 min-w-[50px] text-right">0.050</span>
-        </div>
-      </div>
-
-      <!-- 가이드 메시지 바 -->
-      <div id="guideBanner" class="px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-amber-800 text-xs sm:text-sm font-medium flex items-center gap-2">
-        <span>💡</span>
-        <span id="guideText">캔버스를 터치하거나 클릭하여 데이터 점을 추가해보세요!</span>
-      </div>
-
-      <!-- 도출된 회귀선 방정식 표시 바 -->
-      <div id="equationBox" class="px-4 py-2.5 bg-blue-50/90 border-b border-blue-200 flex items-center justify-between text-xs sm:text-sm font-semibold text-blue-900">
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="text-blue-600 font-bold flex items-center gap-1">
-            <span>📐</span>
-            <span>회귀선 방정식:</span>
-          </span>
-          <code id="equationText" class="px-2.5 py-1 bg-white border border-blue-300 rounded-lg font-mono text-blue-700 font-bold text-sm sm:text-base shadow-sm">
-            ŷ = 0.000x + 50.000
-          </code>
-        </div>
-        <span class="text-slate-600 text-xs hidden sm:inline-block bg-white/60 px-2 py-0.5 rounded border border-slate-200">
-          학습 진행에 따라 실시간 갱신
-        </span>
-      </div>
-
-      <!-- 캔버스 영역 -->
-      <div class="p-4 bg-slate-900/5">
-        <div class="canvas-container bg-white rounded-xl border border-slate-300 shadow-inner overflow-hidden cursor-crosshair">
-          <canvas id="mlCanvas"></canvas>
-        </div>
-      </div>
-
-    </div>
-
-    <!-- 지표 표시 카드 그리드 -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-      
-      <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm text-center">
-        <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">평균제곱오차 (MSE)</div>
-        <div id="metricMSE" class="text-xl md:text-2xl font-black text-rose-600">-</div>
-        <div class="text-[11px] text-slate-600 mt-1">오차의 제곱 평균 (작을수록 좋음)</div>
-      </div>
-
-      <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm text-center">
-        <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">기울기 (m)</div>
-        <div id="metricSlope" class="text-xl md:text-2xl font-black text-blue-600">0.000</div>
-        <div class="text-[11px] text-slate-600 mt-1">변화 비율 (y = mx + b)</div>
-      </div>
-
-      <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm text-center">
-        <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">절편 (b)</div>
-        <div id="metricIntercept" class="text-xl md:text-2xl font-black text-indigo-600">0.000</div>
-        <div class="text-[11px] text-slate-600 mt-1">x=0 일 때의 y 값</div>
-      </div>
-
-      <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm text-center">
-        <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">결정계수 (R²)</div>
-        <div id="metricR2" class="text-xl md:text-2xl font-black text-emerald-600">-</div>
-        <div class="text-[11px] text-slate-600 mt-1">설명력 (1.0에 가까울수록 좋음)</div>
-      </div>
-
-    </div>
-
-    <!-- 머신러닝 학습 가이드 카드 -->
-    <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm text-slate-700 text-sm">
-      <h3 class="font-bold text-slate-900 mb-2 flex items-center gap-1.5 text-base">
-        <span>📖</span> 선형 회귀(Linear Regression) 핵심 개념
-      </h3>
-      <ul class="space-y-1.5 list-disc list-inside text-xs sm:text-sm text-slate-600">
-        <li><b>회귀선 방정식:</b> ŷ = mx + b (입력 x에 대한 예측값 ŷ를 직선으로 모델링)</li>
-        <li><b>경사하강법(Gradient Descent):</b> 오차(MSE)를 줄이기 위해 기울기(m)와 절편(b)을 조금씩 수정하는 학습 알고리즘</li>
-        <li><b>예측 모드:</b> 학습이 완료된 회귀선 위에 임의의 x값을 지정하여 모델이 y값을 어떻게 추정하는지 확인</li>
-      </ul>
-    </div>
-
-  </div>
-
-  <script>
-    const canvas = document.getElementById('mlCanvas');
-    const ctx = canvas.getContext('2d');
-
-    let dataPoints = [];
-    let m = 0;
-    let b = 50;
+def calculate_metrics(y_true, y_pred, n_features):
+    """
+    모델 평가 지표(MAE, MSE, RMSE, R2, Adjusted R2) 계산
+    """
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true, y_pred)
     
-    let currentMode = 'add';
-    let isTraining = false;
-    let predictedX = null;
-    let animationFrameId = null;
+    n = len(y_true)
+    # 자유도 보정 R2 (조정된 R2)
+    if n - n_features - 1 > 0:
+        adj_r2 = 1 - (1 - r2) * (n - 1) / (n - n_features - 1)
+    else:
+        adj_r2 = r2
 
-    const epochsSlider = document.getElementById('epochsSlider');
-    const epochsVal = document.getElementById('epochsVal');
-    const lrSlider = document.getElementById('lrSlider');
-    const lrVal = document.getElementById('lrVal');
-    const guideBanner = document.getElementById('guideBanner');
-    const guideText = document.getElementById('guideText');
-    const trainBtn = document.getElementById('trainBtn');
-
-    function resizeCanvas() {
-      const container = canvas.parentElement;
-      const rect = container.getBoundingClientRect();
-      
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      ctx.scale(dpr, dpr);
-      
-      canvas.cssWidth = rect.width;
-      canvas.cssHeight = rect.height;
-
-      render();
+    return {
+        "MAE": mae,
+        "MSE": mse,
+        "RMSE": rmse,
+        "R2": r2,
+        "Adj_R2": adj_r2
     }
 
-    function dataToCanvasCoords(dataX, dataY) {
-      const margin = 35;
-      const width = canvas.cssWidth - margin * 2;
-      const height = canvas.cssHeight - margin * 2;
 
-      const px = margin + (dataX / 100) * width;
-      const py = (canvas.cssHeight - margin) - (dataY / 100) * height;
-      return { x: px, y: py };
+def train_simple_regression(df, x_col, y_col, test_size):
+    """
+    단순선형회귀 모델 학습 및 결과 반환
+    """
+    data = df[[x_col, y_col]].dropna()
+    X = data[[x_col]]
+    y = data[y_col]
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+
+    y_pred_test = model.predict(X_test)
+    y_pred_train = model.predict(X_train)
+
+    metrics = calculate_metrics(y_test, y_pred_test, n_features=1)
+    
+    # 기울기 및 절편
+    slope = model.coef_[0]
+    intercept = model.intercept_
+
+    return {
+        "model": model,
+        "x_col": x_col,
+        "y_col": y_col,
+        "slope": slope,
+        "intercept": intercept,
+        "X_train": X_train,
+        "X_test": X_test,
+        "y_train": y_train,
+        "y_test": y_test,
+        "y_pred_test": y_pred_test,
+        "metrics": metrics
     }
 
-    function canvasToDataCoords(px, py) {
-      const margin = 35;
-      const width = canvas.cssWidth - margin * 2;
-      const height = canvas.cssHeight - margin * 2;
 
-      const dataX = ((px - margin) / width) * 100;
-      const dataY = (((canvas.cssHeight - margin) - py) / height) * 100;
+def train_multiple_regression(df, x_cols, y_col, test_size, use_standardization=False):
+    """
+    다중선형회귀 모델 학습 및 결과 반환 (표준화 옵션 포함)
+    """
+    data = df[x_cols + [y_col]].dropna()
+    X = data[x_cols]
+    y = data[y_col]
 
-      return {
-        x: Math.max(0, Math.min(100, dataX)),
-        y: Math.max(0, Math.min(100, dataY))
-      };
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+
+    if use_standardization:
+        pipeline = Pipeline([
+            ('scaler', StandardScaler()),
+            ('regressor', LinearRegression())
+        ])
+        pipeline.fit(X_train, y_train)
+        model = pipeline
+        coefficients = pipeline.named_steps['regressor'].coef_
+        intercept = pipeline.named_steps['regressor'].intercept_
+    else:
+        model = LinearRegression()
+        model.fit(X_train, y_train)
+        coefficients = model.coef_
+        intercept = model.intercept_
+
+    y_pred_test = model.predict(X_test)
+    metrics = calculate_metrics(y_test, y_pred_test, n_features=len(x_cols))
+
+    return {
+        "model": model,
+        "x_cols": x_cols,
+        "y_col": y_col,
+        "coefficients": coefficients,
+        "intercept": intercept,
+        "X_train": X_train,
+        "X_test": X_test,
+        "y_train": y_train,
+        "y_test": y_test,
+        "y_pred_test": y_pred_test,
+        "metrics": metrics,
+        "use_standardization": use_standardization
     }
 
-    function calculateMetrics() {
-      if (dataPoints.length === 0) {
-        return { mse: null, r2: null };
-      }
 
-      let sumSquaredErrors = 0;
-      let sumY = 0;
+def explain_coefficient(x_name, slope, y_name):
+    """
+    회귀계수의 의미를 학생 눈높이에 맞게 해석 문장 생성
+    """
+    direction = "증가" if slope > 0 else "감소"
+    abs_slope = abs(slope)
+    return f"💡 **해석 안내**: 다른 조건이 동일할 때, **{x_name}** 변수가 1단위 증가하면 **{y_name}** 예측값은 평균적으로 약 **{abs_slope:.2f}**만큼 **{direction}**합니다. (단, 이는 데이터 기반의 통계적 경향일 뿐 직접적인 인과관계를 의미하지는 않습니다.)"
 
-      for (const p of dataPoints) {
-        const predY = m * p.x + b;
-        const err = p.y - predY;
-        sumSquaredErrors += err * err;
-        sumY += p.y;
-      }
 
-      const mse = sumSquaredErrors / dataPoints.length;
-      const meanY = sumY / dataPoints.length;
+# -----------------------------------------------------------------------------
+# 2. 사이드바 구성 (학습 단계를 유도하고 주요 용어 정리)
+# -----------------------------------------------------------------------------
 
-      let totalSumOfSquares = 0;
-      for (const p of dataPoints) {
-        totalSumOfSquares += Math.pow(p.y - meanY, 2);
-      }
+st.sidebar.title("📌 인공지능 기초 - 선형회귀")
+st.sidebar.info("CSV 데이터를 업로드하고 단순/다중 선형회귀 모델을 만든 후 직접 평가해 봅시다.")
 
-      let r2 = totalSumOfSquares === 0 ? 1 : 1 - (sumSquaredErrors / totalSumOfSquares);
-      r2 = Math.max(-1, Math.min(1, r2));
+st.sidebar.markdown("---")
+st.sidebar.subheader("📖 핵심 용어 사전")
+with st.sidebar.expander("용어 설명 보기"):
+    st.markdown("""
+    - **독립변수(X)**: 원인이 되는 변수 (입력값)
+    - **종속변수(y)**: 결과가 되는 변수 (목표 예측값)
+    - **회귀계수(기울기)**: X가 1 변할 때 y가 변화하는 정도
+    - **절편**: X가 0일 때 y의 기본값
+    - **잔차(Residual)**: 실제값과 예측값의 차이 ($y - \hat{y}$)
+    - **R² (결정계수)**: 모델이 데이터를 얼마나 잘 설명하는지 나타내는 지표 (0~1)
+    """)
 
-      return { mse, r2 };
-    }
+st.sidebar.markdown("---")
+st.sidebar.caption("고등학교 인공지능 기초 수업용 실습 도구")
 
-    function performGradientDescentStep(learningRate) {
-      if (dataPoints.length === 0) return;
 
-      let gradM = 0;
-      let gradB = 0;
-      const N = dataPoints.length;
+# -----------------------------------------------------------------------------
+# 3. 메인 화면 및 6개 탭 구상
+# -----------------------------------------------------------------------------
 
-      for (const p of dataPoints) {
-        const xNorm = p.x / 100;
-        const yNorm = p.y / 100;
-        const bNorm = b / 100;
+st.title("🧪 CSV 데이터로 배우는 선형회귀 실험실")
 
-        const predYNorm = m * xNorm + bNorm;
-        const diff = predYNorm - yNorm;
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "1️⃣ 학습 안내",
+    "2️⃣ CSV 데이터 업로드",
+    "3️⃣ 데이터 탐색",
+    "4️⃣ 단순선형회귀",
+    "5️⃣ 다중선형회귀",
+    "6️⃣ 모델 평가 및 비교"
+])
 
-        gradM += (2 / N) * xNorm * diff;
-        gradB += (2 / N) * diff;
-      }
 
-      m -= learningRate * gradM;
-      let bNorm = (b / 100) - learningRate * gradB;
-      b = bNorm * 100;
+# =============================================================================
+# TAB 1: 학습 안내
+# =============================================================================
+with tab1:
+    st.header("📘 선형회귀(Linear Regression) 핵심 개념 정리")
 
-      if (!isFinite(m)) m = 0;
-      if (!isFinite(b)) b = 50;
-    }
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("1. 회귀(Regression)와 선형회귀란?")
+        st.write("""
+        * **회귀(Regression)**: 연속된 숫자(예: 기온, 키, 집값, 미세먼지 농도 등)를 예측하는 대표적인 **지도학습** 알고리즘입니다.
+        * **선형회귀(Linear Regression)**: 입력 변수($X$)와 출력 변수($y$) 사이의 관계를 가장 잘 설명하는 **직선(또는 평면)**을 찾는 기법입니다.
+        """)
 
-    function startTraining() {
-      if (dataPoints.length < 2) {
-        alert('최소 2개 이상의 데이터 점이 필요합니다!');
-        return;
-      }
+        st.subheader("2. 변수의 종류")
+        st.markdown("""
+        * **독립변수 ($X$)**: 예측에 사용되는 입력 데이터 (예: 풍속, 기온)
+        * **종속변수 ($y$)**: 우리가 맞추고자 하는 결과 목표값 (예: 초미세먼지 농도)
+        """)
 
-      if (isTraining) return;
-      isTraining = true;
+    with col2:
+        st.subheader("3. 수식으로 보는 선형회귀")
+        st.markdown("**단순선형회귀** (독립변수가 1개일 때):")
+        st.latex(r"\hat{y} = b_0 + b_1 x")
 
-      trainBtn.disabled = true;
-      trainBtn.classList.add('opacity-50', 'cursor-not-allowed');
+        st.markdown("**다중선형회귀** (독립변수가 2개 이상일 때):")
+        st.latex(r"\hat{y} = b_0 + b_1 x_1 + b_2 x_2 + \dots + b_n x_n")
 
-      const targetEpochs = parseInt(epochsSlider.value);
-      const learningRate = parseFloat(lrSlider.value);
-      let currentStep = 0;
+        st.caption("※ $b_0$는 절편(y-intercept), $b_1, b_2 \dots$는 기울기(회귀계수), $\hat{y}$는 모델의 예측값입니다.")
 
-      function step() {
-        const stepsPerFrame = Math.max(1, Math.floor(targetEpochs / 50));
+    st.markdown("---")
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.subheader("4. 실제값, 예측값, 잔차")
+        st.info("""
+        * **실제값 ($y$)**: 실제 관측된 진짜 데이터
+        * **예측값 ($\hat{y}$)**: 회귀 방정식이 계산해 낸 값
+        * **잔차 (Residual)**: $\text{실제값} - \text{예측값} = y - \hat{y}$
         
-        for (let i = 0; i < stepsPerFrame && currentStep < targetEpochs; i++) {
-          performGradientDescentStep(learningRate);
-          currentStep++;
-        }
+        선형회귀의 목표는 모든 데이터 점들과 회귀선 사이의 **잔차의 제곱합을 최소로 만드는 선**을 찾는 것입니다.
+        """)
 
-        render();
-
-        if (currentStep < targetEpochs) {
-          animationFrameId = requestAnimationFrame(step);
-        } else {
-          isTraining = false;
-          trainBtn.disabled = false;
-          trainBtn.classList.remove('opacity-50', 'cursor-not-allowed');
-          
-          guideBanner.className = "px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-xs sm:text-sm font-medium flex items-center gap-2";
-          guideText.innerText = "🎉 학습이 완료되었습니다! 결정계수(R²)와 오차(MSE)를 확인해보세요.";
-        }
-      }
-
-      step();
-    }
-
-    function render() {
-      if (!canvas.cssWidth) return;
-
-      const w = canvas.cssWidth;
-      const h = canvas.cssHeight;
-      const margin = 35;
-
-      ctx.clearRect(0, 0, w, h);
-
-      ctx.strokeStyle = '#f1f5f9';
-      ctx.lineWidth = 1;
-
-      for (let i = 0; i <= 100; i += 10) {
-        const pt = dataToCanvasCoords(i, i);
-        ctx.beginPath();
-        ctx.moveTo(pt.x, margin);
-        ctx.lineTo(pt.x, h - margin);
-        ctx.stroke();
+    with col4:
+        st.subheader("⚠️ 주의: 상관관계 vs 인과관계")
+        st.warning("""
+        * **상관관계**: 두 변수가 함께 변하는 경향성 (예: 여름철 아이스크림 판매량과 물놀이 사고 수)
+        * **인과관계**: 한 변수가 다른 변수의 직접적인 원인이 되는 관계
         
-        ctx.beginPath();
-        ctx.moveTo(margin, pt.y);
-        ctx.lineTo(w - margin, pt.y);
-        ctx.stroke();
-      }
+        **회귀 분석에서 강한 연관성이 발견되었다고 해서 반드시 한 변수가 다른 변수의 원인이라는 뜻은 아닙니다!**
+        """)
 
-      ctx.strokeStyle = '#94a3b8';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(margin, h - margin);
-      ctx.lineTo(w - margin, h - margin);
-      ctx.moveTo(margin, margin);
-      ctx.lineTo(margin, h - margin);
-      ctx.stroke();
+    st.markdown("---")
+    with st.expander("❓ [탐구 질문 1] 학습 안내 확인하기"):
+        st.markdown("""
+        1. 독립변수 $X$가 1만큼 증가할 때 종속변수 $y$가 변화하는 양을 나타내는 수식의 요소는 무엇인가요?
+        2. 잔차가 양수($+)라는 것은 모델의 예측값이 실제값보다 크다는 뜻일까요, 작다는 뜻일까요?
+        """)
 
-      ctx.fillStyle = '#64748b';
-      ctx.font = '11px sans-serif';
-      ctx.textAlign = 'center';
-      
-      [0, 50, 100].forEach(val => {
-        const pt = dataToCanvasCoords(val, val);
-        ctx.fillText(val.toString(), pt.x, h - margin + 16);
-        ctx.textAlign = 'right';
-        ctx.fillText(val.toString(), margin - 8, pt.y + 4);
-        ctx.textAlign = 'center';
-      });
 
-      const startPt = dataToCanvasCoords(0, b);
-      const endPt = dataToCanvasCoords(100, m * 100 + b);
+# =============================================================================
+# TAB 2: CSV 데이터 업로드
+# =============================================================================
+with tab2:
+    st.header("📂 CSV 데이터 업로드 및 준비")
 
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(margin, margin, w - margin * 2, h - margin * 2);
-      ctx.clip();
+    st.markdown("""
+    실습할 CSV 파일을 업로드하세요. 준비된 데이터 파일이 없다면 아래 예제 데이터 다운로드 버튼을 눌러 **'미세먼지 예측 예제 데이터'**를 받아 사용해 보세요.
+    """)
 
-      ctx.strokeStyle = '#2563eb';
-      ctx.lineWidth = 3.5;
-      ctx.beginPath();
-      ctx.moveTo(startPt.x, startPt.y);
-      ctx.lineTo(endPt.x, endPt.y);
-      ctx.stroke();
+    # 예제 데이터 생성 및 다운로드 버튼
+    sample_df = generate_sample_data()
+    csv_buffer = io.BytesIO()
+    sample_df.to_csv(csv_buffer, index=False, encoding="utf-8-sig")
+    
+    st.download_button(
+        label="📥 예제 데이터셋 (미세먼지_예측_데이터.csv) 다운로드",
+        data=csv_buffer.getvalue(),
+        file_name="미세먼지_예측_데이터.csv",
+        mime="text/csv"
+    )
 
-      ctx.restore();
+    st.markdown("---")
 
-      const formattedB = b >= 0 ? `+ ${b.toFixed(2)}` : `- ${Math.abs(b).toFixed(2)}`;
-      const eqText = `ŷ = ${m.toFixed(2)}x ${formattedB}`;
-      
-      ctx.font = 'bold 12px sans-serif';
-      const eqMetrics = ctx.measureText(eqText);
-      
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(margin + 8, margin + 8, eqMetrics.width + 16, 24, 6);
-      ctx.fill();
-      ctx.stroke();
+    uploaded_file = st.file_uploader("분석할 CSV 파일을 선택하세요 (UTF-8, CP949 지원)", type=["csv"])
 
-      ctx.fillStyle = '#2563eb';
-      ctx.textAlign = 'left';
-      ctx.fillText(eqText, margin + 16, margin + 24);
+    if uploaded_file is not None:
+        df, err_msg = load_csv(uploaded_file)
+        if err_msg:
+            st.error(err_msg)
+        else:
+            st.session_state.df = df
+            st.success("데이터가 성공적으로 업로드되었습니다!")
+    else:
+        if st.session_state.df is None:
+            st.info("💡 위의 버튼을 통해 예제 데이터를 다운로드받거나, 소장하고 계신 CSV 파일을 업로드해 주세요.")
 
-      dataPoints.forEach((p) => {
-        const pt = dataToCanvasCoords(p.x, p.y);
-        
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
-        ctx.fill();
+    # 데이터가 존재하는 경우 기본 정보 출력
+    if st.session_state.df is not None:
+        current_df = st.session_state.df
 
-        ctx.fillStyle = '#ef4444';
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 5.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      });
+        st.subheader("📊 데이터 미리보기")
+        st.dataframe(current_df.head(), use_container_width=True)
 
-      if (currentMode === 'predict' && predictedX !== null) {
-        const predY = m * predictedX + b;
-        const targetPt = dataToCanvasCoords(predictedX, predY);
-        const bottomPt = dataToCanvasCoords(predictedX, 0);
-        const leftPt = dataToCanvasCoords(0, predY);
+        col1, col2, col3 = st.columns(3)
+        col1.metric("전체 행 수 (Row)", f"{current_df.shape[0]} 개")
+        col2.metric("전체 열 수 (Column)", f"{current_df.shape[1]} 개")
 
-        ctx.setLineDash([5, 4]);
-        ctx.strokeStyle = '#f59e0b';
-        ctx.lineWidth = 2;
+        num_cols = current_df.select_dtypes(include=[np.number]).columns.tolist()
+        str_cols = current_df.select_dtypes(exclude=[np.number]).columns.tolist()
+        col3.metric("숫자형 변수 개수", f"{len(num_cols)} 개")
 
-        ctx.beginPath();
-        ctx.moveTo(bottomPt.x, bottomPt.y);
-        ctx.lineTo(targetPt.x, targetPt.y);
-        ctx.lineTo(leftPt.x, targetPt.y);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        # 데이터 세부 정보 표
+        st.subheader("📋 변수별 데이터 유형 및 결측치 현황")
+        info_df = pd.DataFrame({
+            "데이터 타입": current_df.dtypes.astype(str),
+            "결측치(Missing Value) 수": current_df.isnull().sum(),
+            "구분": ["숫자형(수치형)" if col in num_cols else "문자형/기타" for col in current_df.columns]
+        })
+        st.table(info_df)
 
-        ctx.fillStyle = '#f59e0b';
-        ctx.beginPath();
-        ctx.arc(targetPt.x, targetPt.y, 7, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+        # 데이터 유효성 경고
+        is_valid, msg = validate_data(current_df)
+        if not is_valid:
+            st.error(f"⚠️ {msg}")
+        else:
+            if len(current_df) < 30:
+                st.warning("⚠️ 데이터 개수가 30개 미만입니다. 모델의 평가 결과가 부정확할 수 있으니 주의하세요.")
+            else:
+                st.success(f"✅ {msg}")
 
-        const text = `X: ${predictedX.toFixed(1)} ➔ 예측 Y: ${predY.toFixed(1)}`;
-        ctx.font = 'bold 12px sans-serif';
-        const textWidth = ctx.measureText(text).width;
-        
-        let labelX = targetPt.x + 10;
-        let labelY = targetPt.y - 12;
+    with st.expander("❓ [탐구 질문 2] 데이터 업로드 확인하기"):
+        st.markdown("""
+        1. 업로드한 데이터셋에서 종속변수(y)로 사용하기 적절한 숫자형 변수는 무엇인가요?
+        2. 결측치(Null/NaN)가 존재하는 데이터는 머신러닝 학습 시 어떤 문제를 일으킬 수 있을까요?
+        """)
 
-        if (labelX + textWidth > w - margin) labelX = targetPt.x - textWidth - 15;
-        if (labelY < margin + 15) labelY = targetPt.y + 25;
 
-        ctx.fillStyle = '#1e293b';
-        ctx.beginPath();
-        ctx.roundRect(labelX - 6, labelY - 14, textWidth + 12, 22, 6);
-        ctx.fill();
+# =============================================================================
+# TAB 3: 데이터 탐색
+# =============================================================================
+with tab3:
+    st.header("🔍 탐색적 데이터 분석 (EDA)")
 
-        ctx.fillStyle = '#f8fafc';
-        ctx.fillText(text, labelX, labelY);
-      }
+    if st.session_state.df is None:
+        st.warning("데이터를 먼저 업로드해 주세요 (2단계 탭).")
+    else:
+        df = st.session_state.df
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-      updateMetricsDisplay();
-    }
+        if len(numeric_cols) < 2:
+            st.error("데이터 탐색을 위해서는 최소 2개 이상의 숫자형 변수가 필요합니다.")
+        else:
+            st.subheader("1. 기술통계량")
+            st.dataframe(df[numeric_cols].describe().T, use_container_width=True)
 
-    function updateMetricsDisplay() {
-      const { mse, r2 } = calculateMetrics();
+            st.markdown("---")
+            st.subheader("2. 변수 분포 및 관계 시각화 (산점도 & 히스토그램)")
 
-      document.getElementById('metricMSE').innerText = (mse !== null) ? mse.toFixed(2) : '-';
-      document.getElementById('metricSlope').innerText = m.toFixed(3);
-      document.getElementById('metricIntercept').innerText = b.toFixed(3);
-      
-      const sign = b >= 0 ? '+' : '-';
-      const absB = Math.abs(b).toFixed(3);
-      const eqStr = `ŷ = ${m.toFixed(3)}x ${sign} ${absB}`;
-      const eqElem = document.getElementById('equationText');
-      if (eqElem) {
-        eqElem.innerText = eqStr;
-      }
+            col1, col2 = st.columns(2)
+            with col1:
+                x_var = st.selectbox("X축 변수 선택", numeric_cols, index=0, key="eda_x")
+            with col2:
+                # 기본 y축 선택 시 X축과 다른 변수를 지정
+                default_y_idx = 1 if len(numeric_cols) > 1 else 0
+                y_var = st.selectbox("Y축 변수 선택", numeric_cols, index=default_y_idx, key="eda_y")
 
-      const r2Elem = document.getElementById('metricR2');
-      if (r2 !== null) {
-        r2Elem.innerText = r2.toFixed(3);
-        if (r2 >= 0.7) r2Elem.className = "text-xl md:text-2xl font-black text-emerald-600";
-        else if (r2 >= 0.3) r2Elem.className = "text-xl md:text-2xl font-black text-amber-600";
-        else r2Elem.className = "text-xl md:text-2xl font-black text-rose-600";
-      } else {
-        r2Elem.innerText = '-';
-        r2Elem.className = "text-xl md:text-2xl font-black text-emerald-600";
-      }
-    }
+            col_fig1, col_fig2 = st.columns(2)
+            with col_fig1:
+                fig_hist = px.histogram(
+                    df, x=x_var, title=f"[{x_var}] 변수 분포 히스토그램",
+                    marginal="box", color_discrete_sequence=['#3366CC']
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
 
-    function handleCanvasInteraction(e) {
-      const rect = canvas.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            with col_fig2:
+                fig_scatter = px.scatter(
+                    df, x=x_var, y=y_var, 
+                    title=f"[{x_var}] vs [{y_var}] 산점도",
+                    trendline="ols", trendline_color_override="red",
+                    color_discrete_sequence=['#109618']
+                )
+                st.plotly_chart(fig_scatter, use_container_width=True)
 
-      const px = clientX - rect.left;
-      const py = clientY - rect.top;
+            # 탐구 질의 가이드
+            st.info(f"""
+            📌 **산점도 분석 가이드**
+            * **[{x_var}]** 와 **[{y_var}]** 는 어떤 관계를 보이나요?
+            * 점들이 붉은색 회귀선 주위에 밀집해 있나요, 흩어져 있나요?
+            * 다른 데이터들과 멀리 떨어져 있는 **이상치(Outlier)**가 관측되나요?
+            """)
 
-      const dataPt = canvasToDataCoords(px, py);
+            st.markdown("---")
+            st.subheader("3. 상관계수(Correlation) 분석")
 
-      if (currentMode === 'add') {
-        dataPoints.push(dataPt);
-        guideText.innerText = `📌 점이 추가되었습니다 (총 ${dataPoints.length}개). '학습 시작'을 눌러 최적의 회귀선을 찾아보세요.`;
-      } else if (currentMode === 'predict') {
-        predictedX = dataPt.x;
-        const predY = m * predictedX + b;
-        guideText.innerText = `🎯 X=${predictedX.toFixed(1)} 일 때, 현재 모델의 예측 값은 Y=${predY.toFixed(1)} 입니다.`;
-      }
+            corr_matrix = df[numeric_cols].corr()
 
-      render();
-    }
+            col_corr1, col_corr2 = st.columns([1, 1])
+            with col_corr1:
+                st.markdown("**상관계수 표**")
+                st.dataframe(corr_matrix.style.background_gradient(cmap='coolwarm').format("{:.3f}"), use_container_width=True)
 
-    canvas.addEventListener('pointerdown', handleCanvasInteraction);
+            with col_corr2:
+                st.markdown("**상관계수 히트맵**")
+                fig_heatmap = px.imshow(
+                    corr_matrix, 
+                    text_auto=".2f", 
+                    color_continuous_scale="RdBu_r",
+                    zmin=-1, zmax=1,
+                    title="변수 간 피어슨 상관계수 히트맵"
+                )
+                st.plotly_chart(fig_heatmap, use_container_width=True)
 
-    epochsSlider.addEventListener('input', (e) => {
-      epochsVal.innerText = `${e.target.value}회`;
-    });
+            st.caption("※ 상관계수는 -1부터 1 사이의 값을 가집니다. 1에 가까울수록 강한 양의 상관관계, -1에 가까울수록 강한 음의 상관관계를 나타냅니다.")
 
-    lrSlider.addEventListener('input', (e) => {
-      lrVal.innerText = parseFloat(e.target.value).toFixed(4);
-    });
+            with st.expander("❓ [탐구 질문 3] 데이터 탐색 질문하기"):
+                st.markdown("""
+                1. 두 변수 사이의 상관계수가 0에 가깝다면 선형회귀 모델로 예측하기 적절할까요?
+                2. 두 변수가 높게 상관되어 있다면, 한 변수가 증가함에 따라 다른 변수가 반드시 원인이 되어 변하는 것일까요?
+                """)
 
-    function setMode(mode) {
-      currentMode = mode;
-      const addBtn = document.getElementById('modeAddBtn');
-      const predictBtn = document.getElementById('modePredictBtn');
 
-      if (mode === 'add') {
-        addBtn.className = "flex-1 md:flex-none px-4 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm bg-white text-blue-600";
-        predictBtn.className = "flex-1 md:flex-none px-4 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-1.5 text-slate-600 hover:text-slate-900";
-        canvas.style.cursor = 'crosshair';
-        guideBanner.className = "px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-amber-800 text-xs sm:text-sm font-medium flex items-center gap-2";
-        guideText.innerText = "📍 데이터 추가 모드: 캔버스를 클릭하여 데이터 점을 생성하세요.";
-      } else {
-        predictBtn.className = "flex-1 md:flex-none px-4 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm bg-white text-amber-600";
-        addBtn.className = "flex-1 md:flex-none px-4 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-1.5 text-slate-600 hover:text-slate-900";
-        canvas.style.cursor = 'pointer';
-        guideBanner.className = "px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-amber-800 text-xs sm:text-sm font-medium flex items-center gap-2";
-        guideText.innerText = "🎯 예측하기 모드: 캔버스 위의 특정 X 위치를 클릭하여 예측 Y값을 확인해보세요.";
-      }
-      render();
-    }
+# =============================================================================
+# TAB 4: 단순선형회귀
+# =============================================================================
+with tab4:
+    st.header("📈 단순선형회귀 (Simple Linear Regression)")
 
-    function loadSampleData() {
-      resetData();
-      
-      const samples = [
-        { x: 15, y: 25 }, { x: 25, y: 32 }, { x: 35, y: 48 },
-        { x: 45, y: 52 }, { x: 55, y: 68 }, { x: 65, y: 70 },
-        { x: 75, y: 82 }, { x: 85, y: 88 }
-      ];
+    if st.session_state.df is None:
+        st.warning("데이터를 먼저 업로드해 주세요 (2단계 탭).")
+    else:
+        df = st.session_state.df
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-      dataPoints = samples.map(p => ({
-        x: p.x,
-        y: Math.max(5, Math.min(95, p.y + (Math.random() * 12 - 6)))
-      }));
+        if len(numeric_cols) < 2:
+            st.error("선형회귀 분석을 수행하려면 최소 2개 이상의 숫자형 변수가 필요합니다.")
+        else:
+            col_sel1, col_sel2, col_sel3 = st.columns(3)
+            with col_sel1:
+                x_col = st.selectbox("독립변수 (X) 선택", numeric_cols, index=0, key="simple_x")
+            with col_sel2:
+                # y변수 자동 선택 (x와 겹치지 않게)
+                y_options = [c for c in numeric_cols if c != x_col]
+                y_col = st.selectbox("종속변수 (y) 선택", y_options, index=0, key="simple_y")
+            with col_sel3:
+                test_size = st.slider("테스트 데이터 비율 (Test Size)", 0.1, 0.4, 0.2, step=0.05, key="simple_test_size")
 
-      guideBanner.className = "px-4 py-2.5 bg-blue-50 border-b border-blue-200 text-blue-800 text-xs sm:text-sm font-medium flex items-center gap-2";
-      guideText.innerText = "🎲 예시 데이터가 생성되었습니다. '▶ 학습 시작' 버튼을 눌러보세요!";
-      render();
-    }
+            if st.button("🚀 단순선형회귀 모델 학습하기", key="btn_train_simple"):
+                res = train_simple_regression(df, x_col, y_col, test_size)
+                st.session_state.simple_model_results = res
+                st.success("모델 학습 완료!")
 
-    function resetData() {
-      if (animationFrameId) cancelAnimationFrame(animationFrameId);
-      isTraining = false;
-      dataPoints = [];
-      m = 0;
-      b = 50;
-      predictedX = null;
-      
-      trainBtn.disabled = false;
-      trainBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+            # 학습 결과 표시
+            if st.session_state.simple_model_results is not None:
+                res = st.session_state.simple_model_results
 
-      guideBanner.className = "px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-amber-800 text-xs sm:text-sm font-medium flex items-center gap-2";
-      guideText.innerText = "💡 캔버스를 터치하거나 클릭하여 데이터 점을 추가해보세요!";
-      render();
-    }
+                # 현재 선택 변수와 저장된 결과의 변수가 일치하는지 확인
+                if res['x_col'] == x_col and res['y_col'] == y_col:
+                    st.markdown("---")
+                    st.subheader("1. 모델 학습 결과 및 회귀식")
 
-    window.addEventListener('resize', resizeCanvas);
-    window.addEventListener('load', () => {
-      resizeCanvas();
-      loadSampleData();
-    });
-  </script>
-</body>
-</html>
-"""
+                    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                    col_m1.metric("학습 데이터 수", f"{len(res['X_train'])}개")
+                    col_m2.metric("테스트 데이터 수", f"{len(res['X_test'])}개")
+                    col_m3.metric("기울기 (Slope)", f"{res['slope']:.4f}")
+                    col_m4.metric("절편 (Intercept)", f"{res['intercept']:.4f}")
 
-# Streamlit에 HTML 구성 요소 연동 (높이는 컨텐츠 크기에 맞춰 1050px 설정)
-components.html(html_code, height=1050, scrolling=True)
+                    # 작성된 회귀식 표출
+                    equation_str = f"**예측 {y_col}** = ({res['slope']:.4f}) × **{x_col}** + ({res['intercept']:.4f})"
+                    st.success(f"📐 도출된 단순회귀식: {equation_str}")
+
+                    # 회귀계수 해석
+                    st.info(explain_coefficient(x_col, res['slope'], y_col))
+
+                    st.markdown("---")
+                    st.subheader("2. 회귀선 및 잔차 시각화")
+
+                    # 학습 데이터와 테스트 데이터 시각화
+                    fig_reg = go.Figure()
+
+                    # Train 데이터 점
+                    fig_reg.add_trace(go.Scatter(
+                        x=res['X_train'][x_col], y=res['y_train'],
+                        mode='markers', name='Train Data',
+                        marker=dict(color='blue', opacity=0.6)
+                    ))
+                    # Test 데이터 점
+                    fig_reg.add_trace(go.Scatter(
+                        x=res['X_test'][x_col], y=res['y_test'],
+                        mode='markers', name='Test Data',
+                        marker=dict(color='orange', size=8)
+                    ))
+
+                    # 회귀선 그리기
+                    x_range = np.linspace(df[x_col].min(), df[x_col].max(), 100)
+                    y_range = res['slope'] * x_range + res['intercept']
+                    fig_reg.add_trace(go.Scatter(
+                        x=x_range, y=y_range,
+                        mode='lines', name='Linear Regression Line',
+                        line=dict(color='red', width=2)
+                    ))
+
+                    fig_reg.update_layout(
+                        title=f"[{x_col}] vs [{y_col}] 단순선형회귀선",
+                        xaxis_title=x_col, yaxis_title=y_col
+                    )
+                    st.plotly_chart(fig_reg, use_container_width=True)
+
+                    # 잔차(Residuals) 시각화 그래프
+                    st.markdown("**테스트 데이터 기준 잔차(Residuals) 시각화**")
+                    fig_res = go.Figure()
+                    
+                    # 실제 점
+                    fig_res.add_trace(go.Scatter(
+                        x=res['X_test'][x_col], y=res['y_test'],
+                        mode='markers', name='실제값 (Actual)',
+                        marker=dict(color='orange')
+                    ))
+                    # 예측 점
+                    fig_res.add_trace(go.Scatter(
+                        x=res['X_test'][x_col], y=res['y_pred_test'],
+                        mode='markers', name='예측값 (Predicted)',
+                        marker=dict(color='red', symbol='x')
+                    ))
+
+                    # 잔차 선 연결 (선으로 수직 오차 표시)
+                    for x_val, y_real, y_pred in zip(res['X_test'][x_col], res['y_test'], res['y_pred_test']):
+                        fig_res.add_shape(
+                            type="line", x0=x_val, y0=y_real, x1=x_val, y1=y_pred,
+                            line=dict(color="gray", width=1, dash="dot")
+                        )
+
+                    fig_res.update_layout(
+                        title="실제값과 예측값 사이의 잔차(점선) 확인",
+                        xaxis_title=x_col, yaxis_title=y_col
+                    )
+                    st.plotly_chart(fig_res, use_container_width=True)
+
+                    st.markdown("---")
+                    st.subheader("3. 새로운 값 예측해 보기")
+                    min_val = float(df[x_col].min())
+                    max_val = float(df[x_col].max())
+                    mean_val = float(df[x_col].mean())
+
+                    user_input_x = st.number_input(
+                        f"새로운 [{x_col}] 값 입력:",
+                        min_value=min_val - 100.0, max_value=max_val + 100.0,
+                        value=mean_val
+                    )
+
+                    predicted_y = res['slope'] * user_input_x + res['intercept']
+                    st.metric(f"🎯 예측된 [{y_col}] 값", f"{predicted_y:.2f}")
+
+                    if predicted_y < 0:
+                        st.warning("⚠️ **선형회귀 모델의 한계**: 예측값이 음수로 계산되었습니다. PM2.5나 키, 가격처럼 물리적으로 음수가 존재할 수 없는 변수라도 선형회귀 모델은 일정한 직선 기울기를 계속 따라가기 때문에 음수를 출력할 수 있습니다.")
+
+                    st.caption("“이 값은 데이터에서 학습한 선형적인 경향을 이용한 예측값이며 실제값과 다를 수 있습니다.”")
+
+    with st.expander("❓ [탐구 질문 4] 단순선형회귀 확인하기"):
+        st.markdown("""
+        1. 회귀선에 완전히 겹쳐지지 않는 데이터 점들이 존재하는 이유는 무엇일까요?
+        2. 테스트 데이터 비율(Test Size)을 너무 높게 잡으면(예: 0.5 이상) 모델 학습 과정에 어떤 영향을 미칠까요?
+        """)
+
+
+# =============================================================================
+# TAB 5: 다중선형회귀
+# =============================================================================
+with tab5:
+    st.header("📊 다중선형회귀 (Multiple Linear Regression)")
+
+    if st.session_state.df is None:
+        st.warning("데이터를 먼저 업로드해 주세요 (2단계 탭).")
+    else:
+        df = st.session_state.df
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+        if len(numeric_cols) < 3:
+            st.error("다중선형회귀를 수행하려면 최소 3개 이상의 숫자형 변수가 필요합니다. (독립변수 2개 이상 + 종속변수 1개)")
+        else:
+            col_m_y, col_m_test = st.columns(2)
+            with col_m_y:
+                y_col_multi = st.selectbox("종속변수 (y) 선택", numeric_cols, index=len(numeric_cols)-1, key="multi_y")
+            with col_m_test:
+                test_size_multi = st.slider("테스트 데이터 비율", 0.1, 0.4, 0.2, step=0.05, key="multi_test_size")
+
+            available_x = [col for col in numeric_cols if col != y_col_multi]
+            selected_x_cols = st.multiselect("독립변수들 (X) 선택 (2개 이상 선택):", available_x, default=available_x[:2])
+
+            use_std = st.checkbox("입력 변수 표준화(StandardScaler) 적용", value=False)
+            if use_std:
+                st.caption("💡 **표준화(Standardization)**: 서로 다른 단위(예: 기온°C, 강수량mm, 풍속m/s)를 평균 0, 표준편차 1로 맞추어 회귀계수의 크기를 상대적으로 비교할 수 있게 합니다.")
+
+            if len(selected_x_cols) < 2:
+                st.warning("⚠️ 다중선형회귀를 실행하려면 독립변수(X)를 최소 2개 이상 선택해야 합니다.")
+            else:
+                if st.button("🚀 다중선형회귀 모델 학습하기", key="btn_train_multi"):
+                    res_multi = train_multiple_regression(df, selected_x_cols, y_col_multi, test_size_multi, use_std)
+                    st.session_state.multi_model_results = res_multi
+                    st.success("다중선형회귀 모델 학습 완료!")
+
+            # 다중선형회귀 결과 표시
+            if st.session_state.multi_model_results is not None:
+                res_m = st.session_state.multi_model_results
+
+                # 현재 선택 변수 상태 체크
+                if set(res_m['x_cols']) == set(selected_x_cols) and res_m['y_col'] == y_col_multi:
+                    st.markdown("---")
+                    st.subheader("1. 다중선형회귀 계수 및 방정식")
+
+                    st.write(f"**절편 (Intercept)**: `{res_m['intercept']:.4f}`")
+
+                    # 회귀계수 데이터프레임
+                    coef_df = pd.DataFrame({
+                        "독립변수 (X)": res_m['x_cols'],
+                        "회귀계수 (Coefficient)": res_m['coefficients']
+                    })
+                    
+                    col_c1, col_c2 = st.columns([1, 1])
+                    with col_c1:
+                        st.dataframe(coef_df, use_container_width=True)
+
+                    with col_c2:
+                        fig_coef = px.bar(
+                            coef_df, x="독립변수 (X)", y="회귀계수 (Coefficient)",
+                            text_auto=".3f", title="변수별 회귀계수 크기 비교",
+                            color="회귀계수 (Coefficient)", color_continuous_scale="Viridis"
+                        )
+                        st.plotly_chart(fig_coef, use_container_width=True)
+
+                    st.warning("""
+                    ⚠️ **회귀계수 해석 시주의사항**:
+                    * 다중선형회귀의 회귀계수는 **다른 모든 입력 변수들이 일정하다고 가정했을 때**, 해당 변수가 1만큼 변할 때의 예측값 변화를 의미합니다.
+                    * 변수마다 측정 단위가 다르면(예: m/s vs mm) 단순 회귀계수의 크기만으로 변수의 중요도를 직접 비교할 수 없습니다. (단위 영향을 없애려면 '표준화' 옵션을 사용하세요.)
+                    """)
+
+                    st.markdown("---")
+                    st.subheader("2. 다중선형회귀 기반 시뮬레이션 (새로운 값 예측)")
+                    
+                    st.write("각 독립변수의 값을 입력하여 종속변수를 예측해 보세요:")
+                    user_inputs = {}
+                    
+                    # 동적 입력 폼을 컬럼으로 나눔
+                    input_cols = st.columns(min(len(res_m['x_cols']), 4))
+                    for idx, col_name in enumerate(res_m['x_cols']):
+                        col_target = input_cols[idx % 4]
+                        default_val = float(df[col_name].mean())
+                        user_inputs[col_name] = col_target.number_input(
+                            f"[{col_name}]", 
+                            value=default_val,
+                            key=f"input_multi_{col_name}"
+                        )
+
+                    # 입력값을 데이터프레임 구조로 변환 후 예측
+                    input_df = pd.DataFrame([user_inputs])
+                    pred_multi_y = res_m['model'].predict(input_df)[0]
+
+                    st.metric(f"🎯 예측된 [{y_col_multi}] 값", f"{pred_multi_y:.2f}")
+
+                    if pred_multi_y < 0:
+                        st.warning("⚠️ **선형회귀 모델의 한계**: 예측 결과가 음수로 산출되었습니다.")
+
+    with st.expander("❓ [탐구 질문 5] 다중선형회귀 확인하기"):
+        st.markdown("""
+        1. 단순선형회귀에 비해 독립변수의 개수를 늘렸을 때 모델의 예측 능력은 어떻게 변했나요?
+        2. 서로 매우 유사한 정보를 담고 있는 두 독립변수를 동시에 넣으면 어떤 문제가 발생할 수 있을까요? (힌트: 다중공선성)
+        """)
+
+
+# =============================================================================
+# TAB 6: 모델 평가 및 비교
+# =============================================================================
+with tab6:
+    st.header("⚖️ 모델 평가 및 성능 비교")
+
+    simple_res = st.session_state.simple_model_results
+    multi_res = st.session_state.multi_model_results
+
+    if simple_res is None and multi_res is None:
+        st.warning("단순선형회귀(4단계) 또는 다중선형회귀(5단계) 모델을 최소 하나 이상 학습해 주세요.")
+    else:
+        st.subheader("1. 모델 성능 지표 비교 표")
+
+        comparison_data = []
+
+        if simple_res is not None:
+            m_s = simple_res['metrics']
+            comparison_data.append({
+                "모델 유형": "단순선형회귀",
+                "사용한 독립변수": simple_res['x_col'],
+                "R² (결정계수)": f"{m_s['R2']:.4f}",
+                "조정된 R²": f"{m_s['Adj_R2']:.4f}",
+                "MAE": f"{m_s['MAE']:.4f}",
+                "MSE": f"{m_s['MSE']:.4f}",
+                "RMSE": f"{m_s['RMSE']:.4f}"
+            })
+
+        if multi_res is not None:
+            m_m = multi_res['metrics']
+            comparison_data.append({
+                "모델 유형": "다중선형회귀",
+                "사용한 독립변수": ", ".join(multi_res['x_cols']),
+                "R² (결정계수)": f"{m_m['R2']:.4f}",
+                "조정된 R²": f"{m_m['Adj_R2']:.4f}",
+                "MAE": f"{m_m['MAE']:.4f}",
+                "MSE": f"{m_m['MSE']:.4f}",
+                "RMSE": f"{m_m['RMSE']:.4f}"
+            })
+
+        comp_df = pd.DataFrame(comparison_data)
+        st.table(comp_df)
+
+        # 평가 지표 설명
+        st.info("""
+        📚 **평가 지표 가이드**
+        * **MAE (Mean Absolute Error)**: 실제값과 예측값 차이의 절댓값 평균 (직관적 오차 크기)
+        * **MSE (Mean Squared Error)**: 오차를 제곱하여 평균한 값 (큰 오차에 더 가혹한 벌점)
+        * **RMSE (Root MSE)**: MSE에 제곱근을 씌워 원래 y 변수와 동일한 단위로 맞춰준 지표 (작을수록 좋음)
+        * **R² (결정계수)**: 모델이 종속변수의 전체 변동성을 얼마나 설명하는지 비율 (1에 가까울수록 우수)
+        * **조정된 R² (Adjusted R²)**: 변수를 쓸데없이 많이 추가할 때 발생하는 R² 상승 착시를 보정한 지표
+        """)
+
+        st.markdown("---")
+        st.subheader("2. 실제값 vs 예측값 및 잔차 진단 그래프")
+
+        # 분석할 모델 선택
+        available_models = {}
+        if simple_res is not None:
+            available_models["단순선형회귀"] = simple_res
+        if multi_res is not None:
+            available_models["다중선형회귀"] = multi_res
+
+        selected_model_name = st.radio("진단할 모델 선택:", list(available_models.keys()), horizontal=True)
+        active_res = available_models[selected_model_name]
+
+        y_true = active_res['y_test']
+        y_pred = active_res['y_pred_test']
+        residuals = y_true - y_pred
+
+        col_g1, col_g2 = st.columns(2)
+
+        with col_g1:
+            # 실제값 vs 예측값 산점도
+            fig_act_pred = go.Figure()
+            fig_act_pred.add_trace(go.Scatter(
+                x=y_true, y=y_pred, mode='markers',
+                marker=dict(color='purple', size=8),
+                name='Data Points'
+            ))
+            # 이상적 기준선 y=x
+            min_val = min(y_true.min(), y_pred.min())
+            max_val = max(y_true.max(), y_pred.max())
+            fig_act_pred.add_trace(go.Scatter(
+                x=[min_val, max_val], y=[min_val, max_val],
+                mode='lines', line=dict(color='red', dash='dash'),
+                name='기준선 (y=x)'
+            ))
+            fig_act_pred.update_layout(
+                title=f"[{selected_model_name}] 실제값 vs 예측값",
+                xaxis_title="실제값 (Actual y)", yaxis_title="예측값 (Predicted y)"
+            )
+            st.plotly_chart(fig_act_pred, use_container_width=True)
+
+        with col_g2:
+            # 잔차 분포 히스토그램
+            fig_res_dist = px.histogram(
+                residuals, nbins=20,
+                title=f"[{selected_model_name}] 잔차 분포 히스토그램",
+                labels={'value': '잔차 (y - y_hat)'},
+                color_discrete_sequence=['#FF9900']
+            )
+            st.plotly_chart(fig_res_dist, use_container_width=True)
+
+        # 잔차 산점도 (Residual Plot)
+        fig_res_scatter = go.Figure()
+        fig_res_scatter.add_trace(go.Scatter(
+            x=y_pred, y=residuals, mode='markers',
+            marker=dict(color='teal', size=8)
+        ))
+        fig_res_scatter.add_hline(y=0, line_dash="dash", line_color="red")
+        fig_res_scatter.update_layout(
+            title=f"[{selected_model_name}] 잔차 산점도 (Residual Plot)",
+            xaxis_title="예측값 (Predicted y)", yaxis_title="잔차 (Residual)"
+        )
+        st.plotly_chart(fig_res_scatter, use_container_width=True)
+
+        # 자동 해석 문장 제공
+        st.success("""
+        💡 **시각적 결과 자동 진단**
+        * **실제값 vs 예측값**: 데이터 점들이 붉은 대각선(y=x)에 가까이 빽빽하게 모여 있을수록 예측 성능이 훌륭함을 의미합니다.
+        * **잔차 산점도**: 잔차가 0(빨간 점선)을 중심으로 **특정 패턴 없이 무작위로 고르게 분포**해야 선형 모델의 가정에 부합합니다.
+        * 만약 잔차가 U자 모양이나 곡선 패턴을 보인다면, 실제 데이터는 선형 관계가 아닌 비선형(2차식 등) 관계일 가능성이 높습니다.
+        * 다중선형회귀의 R²가 더 높더라도, **MAE/RMSE 오차 값이 실제로 줄어들었는지**와 **조정된 R²**를 종합해서 평가하세요.
+        """)
+
+    with st.expander("❓ [탐구 질문 6] 종합 모델 평가 질문하기"):
+        st.markdown("""
+        1. 변수의 개수를 계속 늘리기만 하면 R² 값은 항상 증가하거나 유지됩니다. 왜 무작정 변수를 많이 추가하는 것이 좋지 않을까요?
+        2. RMSE 지표와 MAE 지표 중 이상치(Outlier) 오차에 더 예민하게 반응하는 지표는 무엇이며, 그 이유는 무엇일까요?
+        """)
